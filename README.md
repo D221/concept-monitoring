@@ -4,6 +4,8 @@
 
 A simple, web-based dashboard for monitoring system metrics from multiple devices. It consists of a Python-based server and a client agent that reports metrics.
 
+![Screenshot](./screenshots/sample.png)
+
 ## Features
 
 - **Real-time Monitoring**: View live metrics for CPU, memory, disk, and network usage.
@@ -13,24 +15,6 @@ A simple, web-based dashboard for monitoring system metrics from multiple device
 - **Service Monitoring**: Configure clients to watch specific services (e.g., 'nginx', 'mysql') and display their status.
 - **Alerting**: Set thresholds for CPU, memory, and disk usage to receive Discord webhook notifications.
 - **Remote Actions**: Remotely trigger a data refresh on a client.
-
-## Project Structure
-
-```
-concept-monitoring/
-├── client/
-│   ├── client.py           # The agent to run on devices you want to monitor
-│   ├── requirements.txt    # Client dependencies
-│   └── .env.example        # Example environment file for the client
-├── server/
-│   ├── app.py              # The Flask web server
-│   ├── requirements.txt    # Server dependencies
-│   ├── .env.example        # Example environment file for the server
-│   ├── static/             # CSS stylesheets
-│   └── templates/          # HTML templates
-├── .gitignore
-└── README.md
-```
 
 ## Setup & Installation
 
@@ -92,6 +76,7 @@ Navigate to the `server` directory and run the Flask application.
 ```bash
 cd server
 python app.py
+gunicorn -w 4 -b 0.0.0.0:5000 server.app:app # on Linux
 ```
 
 The server will start on `0.0.0.0:5000` by default. You can access the dashboard by navigating to `http://<your-server-ip>:5000` in your web browser.
