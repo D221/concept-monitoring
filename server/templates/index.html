@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Device Monitoring Dashboard</title>
+
+    <!-- Chart.js and Date Adapter libraries -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/date-fns@2.29.3/cdn.min.js"></script>
+    <script
+        src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns@2.0.1/dist/chartjs-adapter-date-fns.bundle.min.js"></script>
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body>
+    {% extends "base.html" %}
+    {% block title %}Device Monitoring Dashboard{% endblock %}
+    {% block content %}
+    <div class="container">
+
+        <table>
+            <thead>
+                <tr>
+                    <th>Hostname</th>
+                    <th>CPU %</th>
+                    <th>Memory %</th>
+                    <th>Disk %</th>
+                    <th>Net In</th>
+                    <th>Net Out</th>
+                    <th>Last Seen</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody id="device-table-body">
+            </tbody>
+        </table>
+    </div>
+
+    <script>
+        const tableBody = document.getElementById('device-table-body');
+        let expandedRows = new Set();
+        let chartInstances = {};
+        let chartTimeRanges = {};
+
+        function getStatusClass(value) {
+            if (value > 90) return 'status-danger';
+            if (value > 80) return 'status-warning';
+            return 'status-ok';
+        }
+
+        function renderSystemInfo(device) {
+            return `
+            <h4>System Information</h4>
+            <p><strong>CPU Model:</strong> ${device.cpu_model || 'N/A'}</p>
+            <p><strong>Total Memory:</strong> ${device.total_memory_readable || 'N/A'}</p>
+            <p><strong>Internal IP:</strong> ${device.internal_ip || 'N/A'} <span class="copy-btn" title="Copy IP" data-copy="${device.internal_ip}"></span></p>
+            <p><strong>External IP:</strong> ${device.external_ip || 'N/A'} <span class="copy-btn" title="Copy IP" data-copy="${device.external_ip}"></span></p>
+        `;
+        }
+        function renderServiceStatuses(services) {
+            if (!services || Object.keys(services).length === 0) {
+                return '<h4>Monitored Services</h4><p>No services configured to monitor.</p>';
+            }
+            let html = '<h4>Monitored Services</h4><ul class="service-status-list">';
+            for (const [service, status] of Object.entries(services)) {
+                const statusClass = `service-status-${status}`; // e.g., 'service-status-running'
+                html += `<li><span class="service-status-dot ${statusClass}"></span> ${service}</li>`;
+            }
+            html += '</ul>';
+            return html;
+        }
+
+
+        function renderDiskDetails(disks) {
+            if (!disks || disks.length === 0) return '<h4>Disks</h4><p>No disk data.</p>';
+            let html = '<h4>Disk Partitions</h4><table><thead><tr><th>Mount</th><th>Usage</th><th>Percent</th></tr></thead><tbody>';
+            disks.forEach(disk => {
+                html += `<tr><td>${disk.mountpoint}</td><td>${disk.used_readable} / ${disk.total_readable}</td><td><span class="${getStatusClass(disk.percent)}">${disk.percent}%</span></td></tr>`;
+            });
+            html += '</tbody></table>';
+            return html;
+        }
+
+        function renderProcessDetails(processes, type) {
+            if (!processes || processes.length === 0) return `<p>No process data.</p>`;
+            let header, usageKey;
+            if (type === 'cpu') {
+                header = 'CPU %'; usageKey = 'cpu_percent';
+            } else if (type === 'memory') {
+                header = 'Memory Usage'; usageKey = 'memory_rss_readable';
+            } else if (type === 'network_in') {
+                header = 'Network In'; usageKey = 'network_in_readable';
+            } else if (type === 'network_out') {
+                header = 'Network Out'; usageKey = 'network_out_readable';
+            }
+            let html = `<table><thead><tr><th>Name</th><th>User</th><th>${header}</th></tr></thead><tbody>`;
+            processes.forEach(proc => {
+                const usage = proc[usageKey] || 'N/A';
+                html += `<tr><td>${proc.name}</td><td>${proc.username || 'N/A'}</td><td>${usage}</td></tr>`;
+            });
+            html += '</tbody></table>';
+            return html;
+        }
+
+        async function fetchAndUpdateDevices() {
+            try {
+                const response = await fetch('/api/devices');
+                if (!response.ok) {
+                    if (tableBody.children.length === 0) tableBody.innerHTML = '<tr><td colspan="8">Error loading device data. Check server connection.</td></tr>';
+                    console.error("Network response was not ok");
+                    return;
+                }
+                const devices = await response.json();
+
+                if (devices.length === 0 && tableBody.children.length === 0) {
+                    tableBody.innerHTML = '<tr><td colspan="8">No devices reporting yet.</td></tr>';
+                    return;
+                }
+
+                const receivedHostnames = new Set(devices.map(d => d.hostname));
+                const existingRows = new Map([...tableBody.querySelectorAll('.device-row')].map(row => [row.dataset.hostname, row]));
+
+                // Remove devices that are no longer in the list
+                for (const [hostname, row] of existingRows.entries()) {
+                    if (!receivedHostnames.has(hostname)) {
+                        const detailsRow = document.getElementById(`details-${hostname}`);
+                        row.remove();
+                        if (detailsRow) detailsRow.remove();
+                        
+                        expandedRows.delete(hostname);
+                        ['cpu', 'memory', 'network_in', 'network_out'].forEach(m => {
+                            const chartId = `${m}-chart-${hostname}`;
+                            if (chartInstances[chartId]) {
+                                chartInstances[chartId].destroy();
+                                delete chartInstances[chartId];
+                            }
+                        });
+                        existingRows.delete(hostname);
+                    }
+                }
+
+                // Add or update devices
+                devices.forEach((device, index) => {
+                    const lastSeen = device.last_seen ? new Date(device.last_seen).toLocaleString() : 'Never';
+                    let mainRow = existingRows.get(device.hostname);
+                    
+                    const mainRowHTML = `
+                        <td><span class="status-dot status-dot-${device.health_status}" title="Status: ${device.health_status}"></span>${device.hostname}</td>
+                        <td class="${getStatusClass(device.cpu)}">${(device.cpu || 0).toFixed(2)}</td>
+                        <td class="${getStatusClass(device.memory)}">${(device.memory || 0).toFixed(2)}</td>
+                        <td class="${getStatusClass(device.disk_max_percent)}">${(device.disk_max_percent || 0).toFixed(2)}</td>
+                        <td>${device.network_in_readable || '0 B/s'}</td>
+                        <td>${device.network_out_readable || '0 B/s'}</td>
+                        <td>${lastSeen}</td>
+                        <td><button class="refresh-btn" data-hostname="${device.hostname}">Refresh</button></td>
+                    `;
+
+                    if (mainRow) {
+                        mainRow.innerHTML = mainRowHTML;
+                    } else {
+                        mainRow = document.createElement('tr');
+                        mainRow.className = 'device-row';
+                        mainRow.dataset.hostname = device.hostname;
+                        mainRow.innerHTML = mainRowHTML;
+
+                        const detailsRow = document.createElement('tr');
+                        detailsRow.className = 'details-row';
+                        detailsRow.id = `details-${device.hostname}`;
+                        
+                        const nextRowInOrder = tableBody.children[index * 2];
+                        tableBody.insertBefore(mainRow, nextRowInOrder || null);
+                        tableBody.insertBefore(detailsRow, nextRowInOrder || null);
+                    }
+
+                    if (expandedRows.has(device.hostname)) {
+                        const detailsRow = document.getElementById(`details-${device.hostname}`);
+                        
+                        // Update the content of the details blocks
+                        const detailsContent = detailsRow.querySelector('.details-content');
+                        detailsContent.querySelector('[data-block="system-info"]').innerHTML = renderSystemInfo(device);
+                        detailsContent.querySelector('[data-block="disk-details"]').innerHTML = renderDiskDetails(device.disk);
+                        detailsContent.querySelector('[data-block="service-status"]').innerHTML = renderServiceStatuses(device.monitored_services);
+                        detailsContent.querySelector('[data-block="top-mem"]').innerHTML = `<h4>Top 5 by Memory</h4>${renderProcessDetails(device.top_processes_by_memory, 'memory')}`;
+                        detailsContent.querySelector('[data-block="top-cpu"]').innerHTML = `<h4>Top 5 by CPU</h4>${renderProcessDetails(device.top_processes_by_cpu, 'cpu')}`;
+                        detailsContent.querySelector('[data-block="top-net-in"]').innerHTML = `<h4>Top 5 Network In</h4>${renderProcessDetails(device.top_processes_by_network_in, 'network_in')}`;
+                        detailsContent.querySelector('[data-block="top-net-out"]').innerHTML = `<h4>Top 5 Network Out</h4>${renderProcessDetails(device.top_processes_by_network_out, 'network_out')}`;
+
+                        // Update charts
+                        const currentRange = chartTimeRanges[device.hostname] || '24h';
+                        ['cpu', 'memory', 'network_in', 'network_out'].forEach(m => createOrUpdateChart(device.hostname, m, currentRange));
+                    }
+                });
+            } catch (error) { console.error("Could not fetch device data:", error); }
+        }
+
+        async function createOrUpdateChart(hostname, metricName, range = '24h') {
+            const chartId = `${metricName}-chart-${hostname}`;
+            const isNetworkChart = metricName.startsWith('network');
+
+            try {
+                const response = await fetch(`/api/history/${hostname}/${metricName}?range=${range}`);
+                const apiResponse = await response.json();
+                const newData = isNetworkChart ? apiResponse.data.map(pt => ({ x: pt.x, y: pt.y / 1024 })) : apiResponse.data;
+
+                const canvas = document.getElementById(chartId);
+                if (!canvas) return;
+
+                const chart = chartInstances[chartId];
+
+                if (chart && chart.canvas === canvas) {
+                    chart.data.datasets[0].data = newData;
+                    chart.options.scales.x.min = apiResponse.min;
+                    chart.options.scales.x.max = apiResponse.max;
+                    chart.update('none');
+                } else {
+                    if (chart) {
+                        chart.destroy();
+                    }
+                    const ctx = canvas.getContext('2d');
+                    chartInstances[chartId] = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            datasets: [{
+                                label: `${metricName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())} Usage`,
+                                data: newData,
+                                borderColor: { cpu: 'rgb(75, 192, 192)', memory: 'rgb(255, 99, 132)', network_in: 'rgb(54, 162, 235)', network_out: 'rgb(153, 102, 255)' }[metricName],
+                                backgroundColor: { cpu: 'rgba(75, 192, 192, 0.2)', memory: 'rgba(255, 99, 132, 0.2)', network_in: 'rgba(54, 162, 235, 0.2)', network_out: 'rgba(153, 102, 255, 0.2)' }[metricName],
+                                tension: 0.1, fill: true
+                            }]
+                        },
+                        options: {
+                            responsive: true, maintainAspectRatio: false,
+                            animation: false,
+                            scales: {
+                                x: { type: 'time', min: apiResponse.min, max: apiResponse.max, time: { unit: 'hour', tooltipFormat: 'HH:mm:ss', displayFormats: { hour: 'HH:mm' } }, ticks: { maxRotation: 0, minRotation: 0 } },
+                                y: {
+                                    beginAtZero: true,
+                                    ticks: {
+                                        callback: function (value) {
+                                            if (isNetworkChart) {
+                                                if (value === 0) return '0 KB/s';
+                                                if (value > 1024 * 1024) return (value / (1024 * 1024)).toFixed(2) + ' GB/s';
+                                                if (value > 1024) return (value / 1024).toFixed(2) + ' MB/s';
+                                                return value.toFixed(2) + ' KB/s';
+                                            }
+                                            return value + ' %';
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+            } catch (error) { console.error(`Failed to load chart for ${metricName}:`, error); }
+        }
+
+        tableBody.addEventListener('click', (event) => {
+            if (event.target.classList.contains('range-btn')) {
+                const button = event.target; const hostname = button.dataset.hostname; const range = button.dataset.range;
+                chartTimeRanges[hostname] = range;
+                const parentControls = button.parentElement;
+                parentControls.querySelectorAll('.range-btn').forEach(btn => btn.classList.remove('active'));
+                button.classList.add('active');
+                ['cpu', 'memory', 'network_in', 'network_out'].forEach(m => createOrUpdateChart(hostname, m, range));
+                return;
+            }
+            if (event.target.classList.contains('copy-btn')) {
+                navigator.clipboard.writeText(event.target.dataset.copy); return;
+            }
+            if (event.target.classList.contains('refresh-btn')) {
+                const hostname = event.target.dataset.hostname;
+                event.target.disabled = true; event.target.textContent = 'Sent';
+                fetch(`/api/command/${hostname}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'refresh' }) });
+                setTimeout(() => { event.target.disabled = false; event.target.textContent = 'Refresh'; }, 3000);
+                return;
+            }
+            const row = event.target.closest('.device-row');
+            if (row) {
+                const hostname = row.dataset.hostname; const detailsRow = document.getElementById(`details-${hostname}`);
+                if (detailsRow) {
+                    const isVisible = detailsRow.style.display === 'table-row';
+                    detailsRow.style.display = isVisible ? 'none' : 'table-row';
+                    if (isVisible) {
+                        expandedRows.delete(hostname);
+                    } else {
+                        expandedRows.add(hostname);
+                        // If details row is empty, populate it for the first time
+                        if (!detailsRow.querySelector('.details-content')) {
+                             detailsRow.innerHTML = `
+                                <td colspan="8">
+                                    <div class="details-content">
+                                        <div class="details-block" data-block="system-info"></div>
+                                        <div class="details-block" data-block="disk-details"></div>
+                                        <div class="details-block" data-block="service-status"></div>
+                                        <div class="details-block" data-block="top-mem"></div>
+                                        <div class="details-block" data-block="top-cpu"></div>
+                                        <div class="details-block" data-block="top-net-in"></div>
+                                        <div class="details-block" data-block="top-net-out"></div>
+                                        <div class="chart-container">
+                                            <div class="chart-controls">
+                                                <span>Time Range:</span>
+                                                <button class="range-btn" data-hostname="${hostname}" data-range="15m">15m</button>
+                                                <button class="range-btn" data-hostname="${hostname}" data-range="1h">1h</button>
+                                                <button class="range-btn" data-hostname="${hostname}" data-range="24h">24h</button>
+                                                <button class="range-btn" data-hostname="${hostname}" data-range="7d">7d</button>
+                                                <button class="range-btn" data-hostname="${hostname}" data-range="30d">30d</button>
+                                            </div>
+                                            <div class="chart-wrapper"><canvas id="cpu-chart-${hostname}"></canvas></div>
+                                            <div class="chart-wrapper" style="margin-top: 20px;"><canvas id="memory-chart-${hostname}"></canvas></div>
+                                            <div class="chart-wrapper" style="margin-top: 20px;"><canvas id="network_in-chart-${hostname}"></canvas></div>
+                                            <div class="chart-wrapper" style="margin-top: 20px;"><canvas id="network_out-chart-${hostname}"></canvas></div>
+                                        </div>
+                                    </div>
+                                </td>`;
+                        }
+                        // Trigger a refresh to populate the just-created (or existing) details row
+                        fetchAndUpdateDevices();
+                    }
+                }
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', () => { fetchAndUpdateDevices(); setInterval(fetchAndUpdateDevices, 15000); });
+    </script>
+    {% endblock %}
+</body>
+
+</html>

@@ -1,0 +1,9 @@
+Flask
+Flask-Login
+Flask-WTF
+Werkzeug
+WTForms
+python-dotenv
+requests
+gunicorn
+pytest

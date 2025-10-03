@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Details for {{ device.hostname }}</title>
+    <style>
+        body {
+            font-family: sans-serif;
+            margin: 2em;
+            background-color: #f4f4f9;
+            color: #333;
+        }
+
+        .container {
+            background: white;
+            padding: 2em;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+        }
+
+        h1,
+        h2 {
+            color: #333;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1em;
+        }
+
+        th,
+        td {
+            padding: 12px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+
+        th {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        a {
+            color: #4CAF50;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <h1>Device Details: {{ device.hostname }}</h1>
+        <a href="{{ url_for('index') }}">&larr; Back to Dashboard</a>
+
+        <h2>System Metrics</h2>
+        <ul>
+            <li><strong>CPU Usage:</strong> {{ "%.2f"|format(device.cpu) }}%</li>
+            <li><strong>Memory Usage:</strong> {{ "%.2f"|format(device.memory) }}%</li>
+            <li><strong>Disk Usage:</strong> {{ "%.2f"|format(device.disk) }}%</li>
+            <li><strong>Internal IP:</strong> {{ device.internal_ip }}</li>
+            <li><strong>External IP:</strong> {{ device.external_ip }}</li>
+            <li><strong>Last Seen:</strong> {{ device.last_seen }}</li>
+        </ul>
+
+        <h2>Top 5 Processes (by CPU)</h2>
+        <table>
+            <thead>
+                <tr>
+                    <th>Name</th>
+                    <th>CPU %</th>
+                    <th>Memory %</th>
+                    <th>User</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for process in device.top_processes %}
+                <tr>
+                    <td>{{ process.name }}</td>
+                    <td>{{ process.cpu_percent }}</td>
+                    <td>{{ process.memory_percent }}</td>
+                    <td>{{ process.username }}</td>
+                </tr>
+                {% else %}
+                <tr>
+                    <td colspan="4">No process data available.</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</body>
+
+</html>
